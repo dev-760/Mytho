@@ -80,7 +80,6 @@ class FineWebEduDataset(IterableDataset):
             name=self.subset,
             split=self.split,
             streaming=True,
-            trust_remote_code=True,
         )
         ds = ds.shuffle(seed=self.seed, buffer_size=10_000)
 
