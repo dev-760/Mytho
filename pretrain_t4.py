@@ -115,6 +115,7 @@ def pretrain(args):
         max_depth=args.max_depth,
         max_seq_len=args.seq_len,
         dropout=args.dropout,
+        n_unique_blocks=args.n_unique_blocks,
     )
     print(f"▸ Config: d={config.d_model}, h={config.n_heads}, "
           f"depth={config.max_depth}, experts={config.n_experts}, "
@@ -363,6 +364,8 @@ def parse_args():
     g.add_argument("--seq_len",          type=int,   default=512,
                    help="Reduced from 2048 for T4 VRAM")
     g.add_argument("--dropout",          type=float, default=0.0)
+    g.add_argument("--n_unique_blocks",  type=int,   default=1,
+                   help="Number of distinct transformer blocks (1=weight-tied)")
     g.add_argument("--use_scratchpad",   action="store_true", default=False)
     g.add_argument("--d_scratch",        type=int,   default=64)
 
