@@ -109,9 +109,17 @@ class MultiLatentAttention(nn.Module):
 
         # Cache handling: store the compressed latent (much smaller)
         if kv_cache is not None:
-            if "latent" in kv_cache and kv_cache["latent"] is not None:
+            if "quantized_cache" in kv_cache:
+                # Two-tier quantized cache (hot FP16 / cold INT8)
+                from .quantized_cache import HierarchicalQuantizedCache
+                qc = kv_cache["quantized_cache"]
+                qc.append(c_kv)
+                c_kv = qc.get_full_cache()
+            elif "latent" in kv_cache and kv_cache["latent"] is not None:
                 c_kv = torch.cat([kv_cache["latent"], c_kv], dim=1)
-            kv_cache["latent"] = c_kv
+                kv_cache["latent"] = c_kv
+            else:
+                kv_cache["latent"] = c_kv
 
         # ── Decompress ──────────────────────────────────────────────
         k_c = self.W_k_content(c_kv).view(B, -1, H, Dh).transpose(1, 2)  # [B,H,Sk,Dh]
@@ -123,16 +131,30 @@ class MultiLatentAttention(nn.Module):
         q = torch.cat([q_c, q_r], dim=-1)   # [B, H, Sq, Dh+Dr]
         k = torch.cat([k_c, k_r], dim=-1)   # [B, H, Sk, Dh+Dr]
 
-        # ── Scaled dot-product attention ────────────────────────────
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,Sq,Sk]
+        # ── Scaled dot-product attention (Flash / Memory-efficient) ──
+        Sk = k.shape[2]
+        drop_p = self.attn_drop.p if self.training else 0.0
 
-        if mask is not None:
-            attn = attn.masked_fill(~mask[:, :, :S, :k.shape[2]], float("-inf"))
-
-        attn = F.softmax(attn, dim=-1)
-        attn = self.attn_drop(attn)
-
-        out = torch.matmul(attn, v)                        # [B, H, S, Dh]
+        if mask is None and S == Sk:
+            # No cache, no mask — use is_causal for Flash Attention
+            out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True,
+                dropout_p=drop_p, scale=self.scale,
+            )
+        elif S == Sk and mask is not None:
+            # Training with causal mask — use is_causal for best perf
+            out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True,
+                dropout_p=drop_p, scale=self.scale,
+            )
+        else:
+            # Generation with KV cache — explicit mask needed
+            attn_mask = mask[:, :, :S, :Sk] if mask is not None else None
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask,
+                dropout_p=drop_p, scale=self.scale,
+            )
+        # out: [B, H, S, Dh]
         out = out.transpose(1, 2).contiguous().view(B, S, H * Dh)
         return self.W_o(out)
 

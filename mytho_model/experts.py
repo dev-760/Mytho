@@ -110,28 +110,27 @@ class MoELayer(nn.Module):
         B, S, D = x.shape
         topk_w, topk_i, logits = self.router(x)   # weights/indices [B,S,k]
 
-        # ── Dispatch & combine ──────────────────────────────────────
-        output = torch.zeros_like(x)
-
-        # Flatten for efficient expert computation
+        # ── Dispatch & combine (single pass over experts) ────────────
         flat_x = x.view(-1, D)                          # [B*S, D]
         flat_w = topk_w.view(-1, self.n_active)          # [B*S, k]
         flat_i = topk_i.view(-1, self.n_active)          # [B*S, k]
         flat_out = torch.zeros_like(flat_x)              # [B*S, D]
 
-        for k_idx in range(self.n_active):
-            expert_indices = flat_i[:, k_idx]             # [B*S]
-            expert_weights = flat_w[:, k_idx : k_idx + 1]  # [B*S, 1]
+        for e_id in range(self.n_experts):
+            # Check all top-k slots at once for this expert
+            is_selected = (flat_i == e_id)               # [B*S, k] bool
+            token_mask = is_selected.any(dim=-1)          # [B*S] bool
+            if not token_mask.any():
+                continue
 
-            for e_id in range(self.n_experts):
-                mask = expert_indices == e_id              # [B*S]
-                if not mask.any():
-                    continue
-                expert_input = flat_x[mask]               # [n_tok, D]
-                expert_out = self.experts[e_id](expert_input)
-                flat_out[mask] += expert_weights[mask] * expert_out
+            # Sum weights from all slots where this expert was picked
+            combined_w = (flat_w * is_selected.float()).sum(dim=-1, keepdim=True)  # [B*S, 1]
+
+            expert_out = self.experts[e_id](flat_x[token_mask])
+            flat_out[token_mask] += combined_w[token_mask] * expert_out
 
         output = flat_out.view(B, S, D)
+
 
         # ── Auxiliary loss ──────────────────────────────────────────
         aux_loss = load_balancing_loss(logits, topk_i, self.n_experts)

@@ -27,6 +27,8 @@ class MythoConfig:
     n_active_experts: int = 2       # top-k experts per token
     d_expert_ff: int = 2048         # hidden dim inside each expert
     expert_balance_coeff: float = 0.01  # auxiliary load-balancing weight
+    use_switch_moe: bool = False        # use Switch Transformer top-1 routing
+    switch_capacity_factor: float = 1.25  # capacity factor for SwitchMoE
 
     # ── Recurrent Depth ─────────────────────────────────────────────
     max_depth: int = 12             # maximum recurrent iterations

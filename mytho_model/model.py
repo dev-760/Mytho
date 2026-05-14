@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from .config import MythoConfig
 from .components import RMSNorm, precompute_rope_frequencies
 from .attention import MultiLatentAttention
-from .experts import MoELayer
+from .experts import MoELayer, SwitchMoELayer
 from .memory import MemoryManager
 from .uncertainty import EnsembleHead
 from .scratchpad import LatentScratchpad
@@ -50,7 +50,11 @@ class MythoBlock(nn.Module):
         self.attn_norm = RMSNorm(config.d_model)
         self.attn = MultiLatentAttention(config)
         self.ffn_norm = RMSNorm(config.d_model)
-        self.moe = MoELayer(config)
+        # Choose MoE variant based on config
+        if config.use_switch_moe:
+            self.moe = SwitchMoELayer(config, config.switch_capacity_factor)
+        else:
+            self.moe = MoELayer(config)
         self.scratchpad = scratchpad
 
     def forward(
@@ -120,7 +124,7 @@ class AdaptiveComputationController(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        block: MythoBlock,
+        blocks: nn.ModuleList | MythoBlock,
         depth_embeddings: nn.Embedding,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
@@ -129,7 +133,7 @@ class AdaptiveComputationController(nn.Module):
         """
         Args:
             x:                input hidden states [B, S, D]
-            block:            the shared MythoBlock
+            blocks:           MythoBlock or ModuleList of blocks (cycled by depth step)
             depth_embeddings: nn.Embedding(max_depth, D)
             rope_cos/sin:     precomputed RoPE tables
             mask:             causal attention mask
@@ -140,6 +144,12 @@ class AdaptiveComputationController(nn.Module):
             moe_loss:   accumulated MoE auxiliary loss (scalar)
             n_updates:  mean number of computation steps (scalar)
         """
+        # Support both single block and block list
+        if isinstance(blocks, nn.ModuleList):
+            block_list = blocks
+        else:
+            block_list = nn.ModuleList([blocks])
+
         B, S, D = x.shape
         device = x.device
 
@@ -156,6 +166,7 @@ class AdaptiveComputationController(nn.Module):
             ).unsqueeze(0).unsqueeze(0)
             x_step = x + d_emb
 
+            block = block_list[step % len(block_list)]
             x_step, moe_aux, _ = block(x_step, rope_cos, rope_sin, mask)
             total_moe_loss = total_moe_loss + moe_aux
 
@@ -221,7 +232,12 @@ class UncertaintyDrivenACT(nn.Module):
             nn.SiLU(), nn.Linear(config.d_model // 4, 1),
         )
 
-    def forward(self, x, block, depth_emb, rope_cos, rope_sin, mask=None):
+    def forward(self, x, blocks, depth_emb, rope_cos, rope_sin, mask=None):
+        # Support both single block and block list
+        if isinstance(blocks, nn.ModuleList):
+            block_list = blocks
+        else:
+            block_list = nn.ModuleList([blocks])
         B, S, D = x.shape
         device = x.device
 
@@ -239,6 +255,8 @@ class UncertaintyDrivenACT(nn.Module):
                 torch.tensor(step, device=device)
             ).unsqueeze(0).unsqueeze(0)
             x_step = x + d_emb
+
+            block = block_list[step % len(block_list)]
 
             # ── Branching at designated depths ──────────────────────
             if step in self.branch_depths and self.n_branches > 1:
@@ -275,9 +293,14 @@ class UncertaintyDrivenACT(nn.Module):
             # Combined: high confidence OR low uncertainty → halt
             p = base_halt * 0.4 + confidence * 0.4 + (1 - uncertainty) * 0.2
 
+            # Fast-path: verifier's own should_halt for very certain tokens
+            verifier_halt = self.verifier.should_halt(verifier_signals)
+
             still_running = (~halted).float()
             p = p * still_running
-            new_halted = ((cumulative_halt + p) >= 0.99) & (~halted)
+            new_halted = (
+                ((cumulative_halt + p) >= 0.99) | verifier_halt
+            ) & (~halted)
             remainder = (1.0 - cumulative_halt) * new_halted.float()
             p_effective = torch.where(new_halted, remainder, p * still_running)
 
@@ -421,9 +444,9 @@ class MythoModel(nn.Module):
             x = self.memory(x)
 
         # ── Recurrent depth with ACT ────────────────────────────────
-        block = self.blocks[0]
+        # Pass full block list — ACT cycles through blocks[step % N]
         act_out = self.act(
-            x, block, self.depth_emb, self.rope_cos, self.rope_sin, mask
+            x, self.blocks, self.depth_emb, self.rope_cos, self.rope_sin, mask
         )
         if self.use_scratchpad:
             x, act_loss, moe_loss, mean_depth, scratch, extra = act_out

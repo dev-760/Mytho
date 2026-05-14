@@ -126,7 +126,7 @@ class HierarchicalQuantizedCache(nn.Module):
         """Estimate memory savings vs full FP16 storage."""
         if self._total_len == 0:
             return 1.0
-        cold_len = self._cold.shape[0] if self._cold is not None else 0
+        cold_len = self._cold.shape[1] if self._cold is not None else 0
         hot_len = self._hot.shape[1] if self._hot is not None else 0
         # INT8 = 1 byte, FP16 = 2 bytes → cold saves 50%
         total_fp16 = (cold_len + hot_len) * 2

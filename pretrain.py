@@ -42,7 +42,6 @@ from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
     size_based_auto_wrap_policy,
 )
-from torch.cuda.amp import GradScaler
 import functools
 
 from mytho_model import MythoConfig, MythoModel
