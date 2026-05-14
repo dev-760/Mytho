@@ -138,13 +138,32 @@ def pretrain(args):
             print(f"  ⚠ Gradient checkpointing skipped: {e}")
 
     # ── Optimizer ───────────────────────────────────────────────────
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(args.beta1, args.beta2),
-        eps=1e-8,
-        weight_decay=args.weight_decay,
-    )
+    if args.optim_8bit:
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(
+                model.parameters(),
+                lr=args.lr,
+                betas=(args.beta1, args.beta2),
+                eps=1e-8,
+                weight_decay=args.weight_decay,
+            )
+            print("▸ Optimizer: AdamW 8-bit (bitsandbytes) — saves ~75% optimizer VRAM")
+        except ImportError:
+            print("  ⚠ bitsandbytes not found, falling back to standard AdamW")
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=args.lr,
+                betas=(args.beta1, args.beta2), eps=1e-8,
+                weight_decay=args.weight_decay,
+            )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.beta1, args.beta2),
+            eps=1e-8,
+            weight_decay=args.weight_decay,
+        )
 
     # ── AMP scaler (FP16 for T4) ────────────────────────────────────
     use_amp = device.type == "cuda"
@@ -390,6 +409,8 @@ def parse_args():
     g.add_argument("--max_grad_norm",    type=float, default=1.0)
     g.add_argument("--grad_checkpoint",  action="store_true", default=False,
                    help="Enable gradient checkpointing (saves VRAM)")
+    g.add_argument("--optim_8bit",       action="store_true", default=False,
+                   help="Use 8-bit AdamW (bitsandbytes) to save ~75%% optimizer VRAM")
 
     # Logging
     g = p.add_argument_group("Logging")
