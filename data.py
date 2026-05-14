@@ -16,6 +16,7 @@ from torch.utils.data import IterableDataset, DataLoader
 # ---------------------------------------------------------------------------
 _TOKENISER = None
 
+
 def get_tokeniser():
     global _TOKENISER
     if _TOKENISER is None:
@@ -34,7 +35,7 @@ def decode(ids: list[int]) -> str:
 
 
 VOCAB_SIZE = 50257          # GPT-2 BPE vocabulary size
-EOT_TOKEN  = 50256          # <|endoftext|>
+EOT_TOKEN = 50256          # <|endoftext|>
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,9 @@ class FineWebEduDataset(IterableDataset):
     def _stream(self):
         """Yield (input_ids, labels) chunks from the HF stream."""
         from datasets import load_dataset
+
+        # Datasets >=3.0 dropped trust_remote_code; clear the env flag if present.
+        os.environ.pop("HF_DATASETS_TRUST_REMOTE_CODE", None)
 
         ds = load_dataset(
             "HuggingFaceFW/fineweb-edu",
@@ -137,4 +141,3 @@ def create_dataloader(
         pin_memory=True,
         drop_last=True,
     )
-
