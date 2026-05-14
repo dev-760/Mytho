@@ -26,7 +26,14 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+    _AMP_DEVICE = "cuda"
+    _AMP_USE_TORCH_AMP = True
+except Exception:
+    from torch.cuda.amp import GradScaler, autocast
+    _AMP_DEVICE = None
+    _AMP_USE_TORCH_AMP = False
 
 from mytho_model import MythoConfig, MythoModel
 from mytho_model.model import MythoBlock
@@ -140,7 +147,10 @@ def pretrain(args):
 
     # ── AMP scaler (FP16 for T4) ────────────────────────────────────
     use_amp = device.type == "cuda"
-    scaler = GradScaler(enabled=use_amp)
+    if _AMP_USE_TORCH_AMP:
+        scaler = GradScaler(_AMP_DEVICE, enabled=use_amp)
+    else:
+        scaler = GradScaler(enabled=use_amp)
     print(f"▸ Mixed precision: {'FP16 (AMP)' if use_amp else 'disabled'}")
 
     # ── Data ────────────────────────────────────────────────────────
@@ -184,7 +194,8 @@ def pretrain(args):
     min_lr = args.lr * 0.1
     eff_batch = args.batch_size * grad_accum
 
-    print(f"▸ Batch: {args.batch_size} × {grad_accum} accum = {eff_batch} effective")
+    print(
+        f"▸ Batch: {args.batch_size} × {grad_accum} accum = {eff_batch} effective")
     print(f"▸ Schedule: {warmup} warmup → {max_steps} total steps")
     print("─" * 64)
 
@@ -222,7 +233,12 @@ def pretrain(args):
             input_ids = input_ids.to(device)
             labels = labels.to(device)
 
-            with autocast(device_type="cuda", enabled=use_amp, dtype=torch.float16):
+            if _AMP_USE_TORCH_AMP:
+                amp_ctx = autocast(
+                    _AMP_DEVICE, enabled=use_amp, dtype=torch.float16)
+            else:
+                amp_ctx = autocast(enabled=use_amp, dtype=torch.float16)
+            with amp_ctx:
                 out = model(input_ids, labels=labels)
                 loss = out["loss"] / grad_accum
 

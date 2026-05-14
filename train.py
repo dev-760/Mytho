@@ -20,7 +20,14 @@ import time
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+    _AMP_DEVICE = "cuda"
+    _AMP_USE_TORCH_AMP = True
+except Exception:
+    from torch.cuda.amp import GradScaler, autocast
+    _AMP_DEVICE = None
+    _AMP_USE_TORCH_AMP = False
 
 from mytho_model import MythoConfig, MythoModel
 
@@ -37,7 +44,8 @@ def synthetic_dataloader(
 ):
     """Yields random token batches for smoke-testing."""
     for _ in range(n_batches):
-        ids = torch.randint(1, vocab_size, (batch_size, seq_len), device=device)
+        ids = torch.randint(
+            1, vocab_size, (batch_size, seq_len), device=device)
         yield ids, ids.clone()  # input_ids, labels
 
 
@@ -89,7 +97,11 @@ def train(args):
 
     total_steps = args.epochs * args.steps_per_epoch
     warmup_steps = int(total_steps * 0.05)
-    scaler = GradScaler(enabled=(device.type == "cuda"))
+    use_amp = device.type == "cuda"
+    if _AMP_USE_TORCH_AMP:
+        scaler = GradScaler(_AMP_DEVICE, enabled=use_amp)
+    else:
+        scaler = GradScaler(enabled=use_amp)
 
     # ── Checkpoint directory ────────────────────────────────────────
     os.makedirs(args.ckpt_dir, exist_ok=True)
@@ -109,12 +121,17 @@ def train(args):
 
         for step, (input_ids, labels) in enumerate(loader, 1):
             # LR schedule
-            lr = get_lr(global_step, warmup_steps, total_steps, args.lr, args.lr * 0.1)
+            lr = get_lr(global_step, warmup_steps,
+                        total_steps, args.lr, args.lr * 0.1)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
             # Forward
-            with autocast(device_type=device.type, enabled=(device.type == "cuda")):
+            if _AMP_USE_TORCH_AMP:
+                amp_ctx = autocast(_AMP_DEVICE, enabled=use_amp)
+            else:
+                amp_ctx = autocast(enabled=use_amp)
+            with amp_ctx:
                 out = model(input_ids, labels=labels)
                 loss = out["loss"]
 
@@ -171,7 +188,8 @@ def train(args):
 #  CLI
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Train a Recurrent-Depth Transformer")
+    p = argparse.ArgumentParser(
+        description="Train a Recurrent-Depth Transformer")
 
     # Model
     p.add_argument("--vocab_size", type=int, default=32000)
@@ -199,4 +217,3 @@ if __name__ == "__main__":
     p.add_argument("--ckpt_dir", type=str, default="checkpoints")
 
     train(p.parse_args())
-
