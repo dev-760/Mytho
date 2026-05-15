@@ -7,17 +7,18 @@ FSDP on a single GPU provides:
   • Native mixed-precision (bf16 / fp16) with loss scaling
 
 Usage:
-  # Full run (streams FineWeb-Edu sample-10BT from HuggingFace)
-  python pretrain.py
+  # Pretrain with a named config (10M, 50M, 100M, 150M, 500M, 1B, 3B, 7B)
+  python pretrain.py --model_size 100M
+  python pretrain.py --model_size 500M
 
-  # Quick smoke-test (100 docs, 50 steps)
-  python pretrain.py --max_docs 100 --max_steps 50
+  # Quick smoke-test
+  python pretrain.py --model_size 10M --max_docs 100 --max_steps 50
 
-  # Larger model
-  python pretrain.py --d_model 1024 --n_heads 16 --d_head 64 --max_depth 16
+  # Custom overrides (flags override model_size defaults)
+  python pretrain.py --model_size 100M --seq_len 512 --batch_size 2
 
   # Resume from checkpoint
-  python pretrain.py --resume checkpoints_pretrain/step_1000.pt
+  python pretrain.py --model_size 100M --resume checkpoints_pretrain/step_1000.pt
 """
 
 import argparse
@@ -65,25 +66,29 @@ def get_lr(step: int, warmup: int, max_steps: int,
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  FSDP setup for single GPU
+#  FSDP setup (single or multi-GPU via torchrun)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def setup_fsdp():
-    """Initialise single-GPU distributed environment for FSDP."""
+    """Initialise distributed environment for FSDP (works with torchrun)."""
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
 
     if not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, rank=0, world_size=1)
+        dist.init_process_group(backend=backend)
 
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if torch.cuda.is_available():
-        torch.cuda.set_device(0)
+        torch.cuda.set_device(local_rank)
+
+    return local_rank
 
 
 def wrap_model_fsdp(model: nn.Module, args) -> FSDP:
-    """Wrap model with FSDP, configured for single-GPU memory efficiency."""
+    """Wrap model with FSDP, configured for memory-efficient training."""
 
     # Auto-wrap each MythoBlock as a separate FSDP unit
     auto_wrap_policy = functools.partial(
@@ -175,18 +180,22 @@ class TrainLogger:
 #  Pretraining loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def pretrain(args):
-    print("=" * 60)
-    print("  Mytho Pretraining on FineWeb-Edu")
-    print("  FSDP + AdamW | Single GPU")
-    print("=" * 60)
-
     # ── Device ──────────────────────────────────────────────────────
-    setup_fsdp()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"▸ Device: {device}")
-    if torch.cuda.is_available():
-        print(f"▸ GPU:    {torch.cuda.get_device_name(0)}")
-        print(f"▸ VRAM:   {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    local_rank = setup_fsdp()
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+
+    if rank == 0:
+        print("=" * 60)
+        print("  Mytho Pretraining on FineWeb-Edu")
+        print(f"  FSDP + AdamW | {world_size} GPU(s)")
+        print("=" * 60)
+        print(f"▸ Device: {device}")
+        if torch.cuda.is_available():
+            for i in range(world_size):
+                print(f"▸ GPU {i}: {torch.cuda.get_device_name(i)}  "
+                      f"({torch.cuda.get_device_properties(i).total_memory / 1e9:.1f} GB)")
 
     # ── Model config ────────────────────────────────────────────────
     config = MythoConfig(
@@ -204,14 +213,16 @@ def pretrain(args):
         dropout=args.dropout,
         n_unique_blocks=args.n_unique_blocks,
     )
-    print(f"▸ Config: d_model={config.d_model}, heads={config.n_heads}, "
-          f"depth={config.max_depth}, experts={config.n_experts}, "
-          f"seq_len={config.max_seq_len}")
+    if rank == 0:
+        print(f"▸ Config: d_model={config.d_model}, heads={config.n_heads}, "
+              f"depth={config.max_depth}, experts={config.n_experts}, "
+              f"seq_len={config.max_seq_len}")
 
     # ── Build model ─────────────────────────────────────────────────
     model = MythoModel(config)
     n_params = model.num_parameters()
-    print(f"▸ Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+    if rank == 0:
+        print(f"▸ Parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
     # ── Wrap with FSDP ──────────────────────────────────────────────
     model = wrap_model_fsdp(model, args)
@@ -231,10 +242,12 @@ def pretrain(args):
         weight_decay=args.weight_decay,
         fused=torch.cuda.is_available(),   # fused AdamW if on CUDA
     )
-    print(f"▸ Optimizer: AdamW (lr={args.lr}, wd={args.weight_decay})")
+    if rank == 0:
+        print(f"▸ Optimizer: AdamW (lr={args.lr}, wd={args.weight_decay})")
 
     # ── Data ────────────────────────────────────────────────────────
-    print(f"▸ Dataset: FineWeb-Edu ({args.subset})")
+    if rank == 0:
+        print(f"▸ Dataset: FineWeb-Edu ({args.subset})")
     dataloader = create_dataloader(
         seq_len=args.seq_len,
         batch_size=args.batch_size,
@@ -246,13 +259,15 @@ def pretrain(args):
 
     # ── Logger ──────────────────────────────────────────────────────
     ckpt_dir = Path(args.ckpt_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    logger = TrainLogger(args.ckpt_dir, use_wandb=args.wandb)
+    if rank == 0:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    logger = TrainLogger(args.ckpt_dir, use_wandb=args.wandb) if rank == 0 else None
 
     # ── Resume from checkpoint ──────────────────────────────────────
     start_step = 0
     if args.resume:
-        print(f"▸ Resuming from {args.resume}")
+        if rank == 0:
+            print(f"▸ Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         # FSDP full_state_dict loading
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
@@ -261,11 +276,13 @@ def pretrain(args):
             model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt.get("step", 0)
-        print(f"▸ Resumed at step {start_step}")
+        if rank == 0:
+            print(f"▸ Resumed at step {start_step}")
 
     # ── Save config ─────────────────────────────────────────────────
-    with open(ckpt_dir / "config.json", "w") as f:
-        json.dump(vars(config) if hasattr(config, '__dict__') else str(config), f, indent=2, default=str)
+    if rank == 0:
+        with open(ckpt_dir / "config.json", "w") as f:
+            json.dump(vars(config) if hasattr(config, '__dict__') else str(config), f, indent=2, default=str)
 
     # ── Training ────────────────────────────────────────────────────
     grad_accum_steps = args.grad_accum
@@ -273,11 +290,12 @@ def pretrain(args):
     max_steps = args.max_steps
     min_lr = args.lr * 0.1
 
-    print(f"▸ Batch: {args.batch_size} × {grad_accum_steps} accum "
-          f"= {args.batch_size * grad_accum_steps} effective")
-    print(f"▸ Schedule: {warmup_steps} warmup → {max_steps} total steps")
-    print(f"▸ Precision: {args.dtype}")
-    print("─" * 60)
+    if rank == 0:
+        print(f"▸ Batch: {args.batch_size} × {grad_accum_steps} accum "
+              f"= {args.batch_size * grad_accum_steps} effective")
+        print(f"▸ Schedule: {warmup_steps} warmup → {max_steps} total steps")
+        print(f"▸ Precision: {args.dtype}")
+        print("─" * 60)
 
     model.train()
     global_step = start_step
@@ -356,48 +374,66 @@ def pretrain(args):
                 "tokens_per_sec": round(tps, 0),
                 "gpu_mem_gb": round(gpu_mem, 2),
             }
-            logger.log(global_step, metrics)
-
-            print(
-                f"  Step {global_step:>6d}/{max_steps} │ "
-                f"Loss {avg_loss:.4f} │ CE {avg_ce:.4f} │ "
-                f"LR {lr:.2e} │ Depth {batch_depth:.1f} │ "
-                f"Tok/s {tps:,.0f} │ GPU {gpu_mem:.1f}GB"
-            )
+            if rank == 0:
+                logger.log(global_step, metrics)
+                print(
+                    f"  Step {global_step:>6d}/{max_steps} │ "
+                    f"Loss {avg_loss:.4f} │ CE {avg_ce:.4f} │ "
+                    f"LR {lr:.2e} │ Depth {batch_depth:.1f} │ "
+                    f"Tok/s {tps:,.0f} │ GPU {gpu_mem:.1f}GB"
+                )
             running_loss = 0.0
             running_ce = 0.0
 
         # ── Checkpoint ──────────────────────────────────────────────
-        if global_step % args.save_every == 0:
+        if global_step % args.save_every == 0 and rank == 0:
             save_checkpoint(model, optimizer, config, global_step,
                             tokens_seen, ckpt_dir)
 
     # ── Final checkpoint ────────────────────────────────────────────
-    save_checkpoint(model, optimizer, config, global_step, tokens_seen, ckpt_dir)
+    if rank == 0:
+        save_checkpoint(model, optimizer, config, global_step, tokens_seen, ckpt_dir)
     elapsed = time.time() - t_start
-    print("─" * 60)
-    print(f"▸ Training complete: {global_step} steps, "
-          f"{tokens_seen:,} tokens, {elapsed / 3600:.1f}h")
-    logger.close()
+    if rank == 0:
+        print("─" * 60)
+        print(f"▸ Training complete: {global_step} steps, "
+              f"{tokens_seen:,} tokens, {elapsed / 3600:.1f}h")
+        logger.close()
     dist.destroy_process_group()
 
 
 def save_checkpoint(model, optimizer, config, step, tokens, ckpt_dir):
-    """Save FSDP full-state checkpoint."""
+    """Save FSDP full-state checkpoint (.pt + .safetensors)."""
     from torch.distributed.fsdp import FullStateDictConfig, StateDictType
 
     full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
+        model_sd = model.state_dict()
+
+        # PyTorch checkpoint (full: weights + optimizer + config)
         state = {
             "step": step,
             "tokens_seen": tokens,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": model_sd,
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
         }
-        path = Path(ckpt_dir) / f"step_{step}.pt"
-        torch.save(state, path)
-        print(f"  ✓ Checkpoint → {path}")
+        pt_path = Path(ckpt_dir) / f"step_{step}.pt"
+        torch.save(state, pt_path)
+        print(f"  ✓ Checkpoint → {pt_path}")
+
+        # Safetensors (weights only, portable)
+        try:
+            from safetensors.torch import save_file
+            sf_path = Path(ckpt_dir) / f"step_{step}.safetensors"
+            clean = {k: v.contiguous() for k, v in model_sd.items()}
+            save_file(clean, str(sf_path), metadata={
+                "step": str(step), "tokens_seen": str(tokens),
+                "format": "mytho",
+            })
+            print(f"  ✓ Safetensors → {sf_path}")
+        except ImportError:
+            pass  # safetensors not installed, skip silently
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -405,6 +441,11 @@ def save_checkpoint(model, optimizer, config, step, tokens, ckpt_dir):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def parse_args():
     p = argparse.ArgumentParser(description="Pretrain Mytho on FineWeb-Edu")
+
+    # Model size preset
+    p.add_argument("--model_size",      type=str,   default=None,
+                   choices=["10M", "50M", "100M", "150M", "500M", "1B", "3B", "7B"],
+                   help="Named model config (overrides architecture defaults)")
 
     # Model architecture
     g = p.add_argument_group("Model")
@@ -463,9 +504,22 @@ def parse_args():
     g.add_argument("--resume",          type=str,   default=None,
                    help="Path to checkpoint to resume from")
 
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Apply model_size preset (CLI flags override preset values)
+    if args.model_size:
+        from model_configs import MODEL_CONFIGS
+        import sys
+        preset = MODEL_CONFIGS[args.model_size]
+        for key, val in preset.items():
+            if f"--{key}" not in " ".join(sys.argv):
+                setattr(args, key, val)
+        print(f"▸ Using Mytho-{args.model_size} preset")
+
+    return args
 
 
 if __name__ == "__main__":
     pretrain(parse_args())
+
 

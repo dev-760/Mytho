@@ -90,13 +90,18 @@ Mytho/
 │   ├── reflexion.py           # Optional Reflexion loop
 │   └── react.py               # Optional ReAct loop
 ├── data.py                    # FineWeb-Edu streaming data pipeline
-├── pretrain.py                # FSDP + AdamW pretraining (single GPU)
+├── model_configs.py           # Predefined model configs (10M → 7B)
+├── pretrain.py                # FSDP + AdamW pretraining (single/multi-GPU)
+├── pretrain_t4.py             # T4-optimised single-GPU pretraining
 ├── train.py                   # Lightweight training (synthetic data)
 ├── generate.py                # Text generation demo
+├── export.py                  # Export to Safetensors / ONNX
 ├── test_model.py              # Full test suite
 ├── test_pretrain.py           # Data + FSDP validation
-├── mytho_colab.ipynb            # Colab-ready notebook
+├── mytho_kaggle.ipynb         # Kaggle notebook (2× T4)
+├── mytho_colab.ipynb          # Colab notebook (1× T4)
 ├── requirements.txt           # Python dependencies
+├── .gitignore
 └── README.md
 ```
 
@@ -130,8 +135,31 @@ python train.py --epochs 2 --steps_per_epoch 20 --batch_size 2
 
 ### 4. Pretrain on FineWeb-Edu (streaming)
 
+Mytho ships with 8 predefined configs via `--model_size`:
+
+| Config | Params | Active/tok | VRAM (est.) | Hardware |
+|--------|--------|-----------|-------------|----------|
+| **10M** | ~10M | ~8M | <1 GB | Any GPU |
+| **50M** | ~50M | ~30M | ~1-2 GB | Any GPU |
+| **100M** | ~100M | ~65M | ~2-3 GB | T4 / free Colab |
+| **150M** | ~150M | ~90M | ~3-4 GB | T4 |
+| **500M** | ~500M | ~160M | ~5-6 GB | T4 |
+| **1B** | ~1.05B | ~300M | ~8-10 GB | T4 |
+| **3B** | ~3.2B | ~570M | ~13-15 GB | T4 (tight) |
+| **7B** | ~7B | ~1.2B | ~40+ GB | A100 / multi-GPU |
+
 ```bash
-python pretrain.py --max_docs 100 --max_steps 50 --batch_size 2 --seq_len 256
+# Kaggle 2× T4 (recommended — uses FSDP across both GPUs)
+torchrun --nproc_per_node=2 pretrain.py --model_size 500M --dtype fp16
+
+# Colab / single T4
+python pretrain_t4.py --model_size 100M --grad_checkpoint --optim_8bit
+
+# FSDP single-GPU with CPU offload
+python pretrain.py --model_size 1B --dtype fp16 --cpu_offload
+
+# Quick smoke-test
+python pretrain_t4.py --model_size 10M --max_docs 50 --max_steps 20
 ```
 
 ### 5. Generate Text
@@ -139,6 +167,27 @@ python pretrain.py --max_docs 100 --max_steps 50 --batch_size 2 --seq_len 256
 ```bash
 python generate.py --checkpoint checkpoints_pretrain/step_1000.pt --prompt "Once upon"
 ```
+
+### 6. Export Model
+
+Checkpoints are saved as both **PyTorch** (`.pt`) and **Safetensors** (`.safetensors`) during training.
+
+```bash
+# Export to safetensors
+python export.py --checkpoint checkpoints_t4/step_2000.pt --format safetensors
+
+# Export to ONNX (inference-only, fixed depth)
+python export.py --checkpoint checkpoints_t4/step_2000.pt --format onnx
+
+# Both
+python export.py --checkpoint checkpoints_t4/step_2000.pt --format all
+```
+
+| Format | Contains | Use Case |
+|--------|----------|----------|
+| `.pt` | Weights + optimizer + config | Resume training |
+| `.safetensors` | Weights only | Portable, fast loading |
+| `.onnx` | Full inference graph | Deployment, cross-platform |
 
 ---
 

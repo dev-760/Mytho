@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Training artifacts
+checkpoints*/
+*.pt
+*.pth
+train_log.jsonl
+
+# Exports
+exports/
+*.onnx
+*.safetensors
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Weights & Biases
+wandb/
+
+# Environment
+.env
+venv/
+.venv/

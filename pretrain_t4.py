@@ -10,10 +10,12 @@ Designed for Google Colab's free T4 (16 GB VRAM):
   • Live loss logging
 
 Usage (Colab cell):
-    !python pretrain_t4.py --max_steps 2000 --batch_size 4 --seq_len 512
+    # Named configs: 10M, 50M, 100M, 150M, 500M, 1B, 3B, 7B
+    !python pretrain_t4.py --model_size 100M --grad_checkpoint --optim_8bit
+    !python pretrain_t4.py --model_size 500M --grad_checkpoint --optim_8bit
 
-Quick smoke-test:
-    !python pretrain_t4.py --max_steps 20 --batch_size 2 --seq_len 128 --max_docs 50
+    # Quick smoke-test
+    !python pretrain_t4.py --model_size 10M --max_docs 50 --max_steps 20
 """
 
 import argparse
@@ -325,26 +327,43 @@ def pretrain(args):
         # ── Checkpoint ──────────────────────────────────────────────
         if global_step % args.save_every == 0:
             path = ckpt_dir / f"step_{global_step}.pt"
+            model_sd = model.state_dict()
             torch.save({
                 "step": global_step,
                 "tokens_seen": tokens_seen,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": model_sd,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "config": config,
                 "history": history,
             }, path)
             print(f"  ✓ Checkpoint → {path}")
+            try:
+                from safetensors.torch import save_file
+                sf_path = ckpt_dir / f"step_{global_step}.safetensors"
+                save_file({k: v.contiguous() for k, v in model_sd.items()},
+                          str(sf_path), metadata={"step": str(global_step), "format": "mytho"})
+                print(f"  ✓ Safetensors → {sf_path}")
+            except ImportError:
+                pass
 
     # ── Final save ──────────────────────────────────────────────────
     final_path = ckpt_dir / f"step_{global_step}.pt"
+    model_sd = model.state_dict()
     torch.save({
         "step": global_step,
         "tokens_seen": tokens_seen,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": model_sd,
         "optimizer_state_dict": optimizer.state_dict(),
         "config": config,
         "history": history,
     }, final_path)
+    try:
+        from safetensors.torch import save_file
+        sf_path = ckpt_dir / f"step_{global_step}.safetensors"
+        save_file({k: v.contiguous() for k, v in model_sd.items()},
+                  str(sf_path), metadata={"step": str(global_step), "format": "mytho"})
+    except ImportError:
+        pass
 
     # Save history for plotting
     with open(ckpt_dir / "history.json", "w") as f:
@@ -367,6 +386,11 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Pretrain Mytho on FineWeb-Edu (T4 optimised)"
     )
+
+    # Model size preset
+    p.add_argument("--model_size",       type=str,   default=None,
+                   choices=["10M", "50M", "100M", "150M", "500M", "1B", "3B", "7B"],
+                   help="Named model config (overrides architecture defaults)")
 
     # Model — T4 defaults
     g = p.add_argument_group("Model")
@@ -419,8 +443,21 @@ def parse_args():
     g.add_argument("--ckpt_dir",         type=str,   default="checkpoints_t4")
     g.add_argument("--resume",           type=str,   default=None)
 
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Apply model_size preset (CLI flags override preset values)
+    if args.model_size:
+        from model_configs import MODEL_CONFIGS
+        import sys
+        preset = MODEL_CONFIGS[args.model_size]
+        for key, val in preset.items():
+            if f"--{key}" not in " ".join(sys.argv):
+                setattr(args, key, val)
+        print(f"▸ Using Mytho-{args.model_size} preset")
+
+    return args
 
 
 if __name__ == "__main__":
     pretrain(parse_args())
+
