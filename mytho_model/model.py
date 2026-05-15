@@ -274,9 +274,12 @@ class UncertaintyDrivenACT(nn.Module):
                     branch_scores.append(v_sig["confidence"])
                     branch_scratches.append(br_scratch)
                 # Select best branch
-                x_step = self.brancher.select_soft(branch_results, branch_scores)
-                best_idx = torch.cat(branch_scores, -1).argmax(-1, keepdim=True)
-                best_idx_exp = best_idx.unsqueeze(-1).expand(-1, -1, -1, self.d_scratch)
+                x_step = self.brancher.select_soft(
+                    branch_results, branch_scores)
+                best_idx = torch.cat(
+                    branch_scores, -1).argmax(-1, keepdim=True)
+                best_idx_exp = best_idx.unsqueeze(
+                    -1).expand(-1, -1, -1, self.d_scratch)
                 stacked_s = torch.stack(branch_scratches, dim=2)
                 scratch = stacked_s.gather(2, best_idx_exp).squeeze(2)
             else:
@@ -315,7 +318,8 @@ class UncertaintyDrivenACT(nn.Module):
 
         not_halted = (~halted).float()
         if not_halted.any():
-            accumulated_output = accumulated_output + (1 - cumulative_halt) * not_halted * x
+            accumulated_output = accumulated_output + \
+                (1 - cumulative_halt) * not_halted * x
             n_updates = n_updates + not_halted
 
         ponder_cost = n_updates.float().mean() * self.act_loss_coeff
@@ -360,11 +364,13 @@ class MythoModel(nn.Module):
         self.emb_drop = nn.Dropout(config.dropout)
 
         # ── Scratchpad (shared by block and ACT) ────────────────────
-        scratchpad = LatentScratchpad(config.d_model, d_scratch) if use_scratchpad else None
+        scratchpad = LatentScratchpad(
+            config.d_model, d_scratch) if use_scratchpad else None
 
         # ── Shared transformer block(s) ────────────────────────────
         self.blocks = nn.ModuleList(
-            [MythoBlock(config, scratchpad=scratchpad) for _ in range(config.n_unique_blocks)]
+            [MythoBlock(config, scratchpad=scratchpad)
+             for _ in range(config.n_unique_blocks)]
         )
 
         # ── Adaptive computation controller ────────────────────────
@@ -413,7 +419,8 @@ class MythoModel(nn.Module):
     @staticmethod
     def _make_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
         """Lower-triangular boolean mask [1, 1, S, S]."""
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool))
+        mask = torch.tril(torch.ones(seq_len, seq_len,
+                          device=device, dtype=torch.bool))
         return mask.unsqueeze(0).unsqueeze(0)
 
     # ── Forward pass ────────────────────────────────────────────────
@@ -456,6 +463,9 @@ class MythoModel(nn.Module):
 
         # ── Language model head ─────────────────────────────────────
         x = self.out_norm(x)
+        if x.dtype != self.lm_head.weight.dtype:
+            # Align dtype with tied LM head weights under FSDP mixed precision.
+            x = x.to(self.lm_head.weight.dtype)
         logits = self.lm_head(x)
 
         result = {
@@ -512,7 +522,7 @@ class MythoModel(nn.Module):
 
         for _ in range(max_new_tokens):
             # Truncate to max context window
-            context = generated[:, -self.config.max_seq_len :]
+            context = generated[:, -self.config.max_seq_len:]
             out = self.forward(context)
             next_logits = out["logits"][:, -1, :]             # [B, V]
 
@@ -527,13 +537,16 @@ class MythoModel(nn.Module):
 
             # Top-p (nucleus) filtering
             if top_p < 1.0:
-                sorted_logits, sorted_idx = torch.sort(next_logits, descending=True)
-                cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_logits, sorted_idx = torch.sort(
+                    next_logits, descending=True)
+                cum_probs = torch.cumsum(
+                    F.softmax(sorted_logits, dim=-1), dim=-1)
                 remove = cum_probs > top_p
                 remove[:, 1:] = remove[:, :-1].clone()
                 remove[:, 0] = False
                 sorted_logits[remove] = float("-inf")
-                next_logits = sorted_logits.scatter(1, sorted_idx, sorted_logits)
+                next_logits = sorted_logits.scatter(
+                    1, sorted_idx, sorted_logits)
 
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
@@ -543,4 +556,3 @@ class MythoModel(nn.Module):
                 break
 
         return generated
-
