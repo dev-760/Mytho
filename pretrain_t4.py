@@ -277,9 +277,8 @@ def pretrain(args):
             pg["lr"] = lr
 
         # Gradient clipping
-        if args.max_grad_norm > 0:
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
         # Optimizer step
         scaler.step(optimizer)
