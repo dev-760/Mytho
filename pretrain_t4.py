@@ -277,8 +277,9 @@ def pretrain(args):
             pg["lr"] = lr
 
         # Gradient clipping
-        scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+        if args.max_grad_norm > 0:
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
         # Optimizer step
         scaler.step(optimizer)
@@ -389,7 +390,8 @@ def parse_args():
 
     # Model size preset
     p.add_argument("--model_size",       type=str,   default=None,
-                   choices=["10M", "50M", "100M", "150M", "500M", "1B", "3B", "7B"],
+                   choices=["10M", "50M", "100M",
+                            "150M", "500M", "1B", "3B", "7B"],
                    help="Named model config (overrides architecture defaults)")
 
     # Model — T4 defaults
@@ -460,4 +462,3 @@ def parse_args():
 
 if __name__ == "__main__":
     pretrain(parse_args())
-
