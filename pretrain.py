@@ -140,7 +140,7 @@ def apply_activation_checkpointing(model: FSDP):
         apply_activation_checkpointing as _apply_ac,
     )
 
-    check_fn = lambda module: isinstance(module, MythoBlock)
+    def check_fn(module): return isinstance(module, MythoBlock)
     _apply_ac(model, checkpoint_wrapper_fn=checkpoint_wrapper, check_fn=check_fn)
 
 
@@ -184,7 +184,8 @@ def pretrain(args):
     local_rank = setup_fsdp()
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     if rank == 0:
         print("=" * 60)
@@ -261,7 +262,8 @@ def pretrain(args):
     ckpt_dir = Path(args.ckpt_dir)
     if rank == 0:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-    logger = TrainLogger(args.ckpt_dir, use_wandb=args.wandb) if rank == 0 else None
+    logger = TrainLogger(
+        args.ckpt_dir, use_wandb=args.wandb) if rank == 0 else None
 
     # ── Resume from checkpoint ──────────────────────────────────────
     start_step = 0
@@ -282,7 +284,8 @@ def pretrain(args):
     # ── Save config ─────────────────────────────────────────────────
     if rank == 0:
         with open(ckpt_dir / "config.json", "w") as f:
-            json.dump(vars(config) if hasattr(config, '__dict__') else str(config), f, indent=2, default=str)
+            json.dump(vars(config) if hasattr(config, '__dict__')
+                      else str(config), f, indent=2, default=str)
 
     # ── Training ────────────────────────────────────────────────────
     grad_accum_steps = args.grad_accum
@@ -385,14 +388,15 @@ def pretrain(args):
             running_loss = 0.0
             running_ce = 0.0
 
-        # ── Checkpoint ──────────────────────────────────────────────
-        if global_step % args.save_every == 0 and rank == 0:
-            save_checkpoint(model, optimizer, config, global_step,
-                            tokens_seen, ckpt_dir)
+            # ── Checkpoint ──────────────────────────────────────────────
+            if global_step % args.save_every == 0 and rank == 0:
+                save_checkpoint(model, optimizer, config, global_step,
+                                tokens_seen, ckpt_dir, args.state_dict_type)
 
     # ── Final checkpoint ────────────────────────────────────────────
     if rank == 0:
-        save_checkpoint(model, optimizer, config, global_step, tokens_seen, ckpt_dir)
+        save_checkpoint(model, optimizer, config, global_step, tokens_seen,
+                        ckpt_dir, args.state_dict_type)
     elapsed = time.time() - t_start
     if rank == 0:
         print("─" * 60)
@@ -402,27 +406,32 @@ def pretrain(args):
     dist.destroy_process_group()
 
 
-def save_checkpoint(model, optimizer, config, step, tokens, ckpt_dir):
-    """Save FSDP full-state checkpoint (.pt + .safetensors)."""
+def save_checkpoint(model, optimizer, config, step, tokens, ckpt_dir, state_dict_type: str = "full"):
+    """Save FSDP checkpoint (.pt, plus optional .safetensors for full state)."""
     from torch.distributed.fsdp import FullStateDictConfig, StateDictType
 
-    full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
-        model_sd = model.state_dict()
+    if state_dict_type == "sharded":
+        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+            model_sd = model.state_dict()
+    else:
+        full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
+            model_sd = model.state_dict()
 
-        # PyTorch checkpoint (full: weights + optimizer + config)
-        state = {
-            "step": step,
-            "tokens_seen": tokens,
-            "model_state_dict": model_sd,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "config": config,
-        }
-        pt_path = Path(ckpt_dir) / f"step_{step}.pt"
-        torch.save(state, pt_path)
-        print(f"  ✓ Checkpoint → {pt_path}")
+    # PyTorch checkpoint (weights + optimizer + config)
+    state = {
+        "step": step,
+        "tokens_seen": tokens,
+        "model_state_dict": model_sd,
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": config,
+    }
+    pt_path = Path(ckpt_dir) / f"step_{step}.pt"
+    torch.save(state, pt_path)
+    print(f"  ✓ Checkpoint → {pt_path}")
 
-        # Safetensors (weights only, portable)
+    # Safetensors (weights only, portable) only for FULL state dicts
+    if state_dict_type == "full":
         try:
             from safetensors.torch import save_file
             sf_path = Path(ckpt_dir) / f"step_{step}.safetensors"
@@ -434,6 +443,8 @@ def save_checkpoint(model, optimizer, config, step, tokens, ckpt_dir):
             print(f"  ✓ Safetensors → {sf_path}")
         except ImportError:
             pass  # safetensors not installed, skip silently
+    else:
+        print("  Note: Skipping safetensors for sharded state dict.")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -444,7 +455,8 @@ def parse_args():
 
     # Model size preset
     p.add_argument("--model_size",      type=str,   default=None,
-                   choices=["10M", "50M", "100M", "150M", "500M", "1B", "3B", "7B"],
+                   choices=["10M", "50M", "100M",
+                            "150M", "500M", "1B", "3B", "7B"],
                    help="Named model config (overrides architecture defaults)")
 
     # Model architecture
@@ -455,7 +467,7 @@ def parse_args():
     g.add_argument("--d_latent_kv",     type=int,   default=256)
     g.add_argument("--d_rope",          type=int,   default=32)
     g.add_argument("--n_experts",       type=int,   default=8)
-    g.add_argument("--n_active_experts",type=int,   default=2)
+    g.add_argument("--n_active_experts", type=int,   default=2)
     g.add_argument("--d_expert_ff",     type=int,   default=2048)
     g.add_argument("--max_depth",       type=int,   default=12)
     g.add_argument("--seq_len",         type=int,   default=1024)
@@ -493,13 +505,18 @@ def parse_args():
                    choices=["fp32", "fp16", "bf16"])
     g.add_argument("--cpu_offload",     action="store_true", default=False,
                    help="Offload FSDP params to CPU (saves VRAM)")
-    g.add_argument("--activation_checkpointing", action="store_true", default=True)
+    g.add_argument("--activation_checkpointing",
+                   action="store_true", default=True)
+    g.add_argument("--state_dict_type", type=str, default="full",
+                   choices=["full", "sharded"],
+                   help="Checkpoint format: full (gathers weights) or sharded (faster)")
 
     # Logging / checkpointing
     g = p.add_argument_group("Logging")
     g.add_argument("--log_every",       type=int,   default=10)
     g.add_argument("--save_every",      type=int,   default=1000)
-    g.add_argument("--ckpt_dir",        type=str,   default="checkpoints_pretrain")
+    g.add_argument("--ckpt_dir",        type=str,
+                   default="checkpoints_pretrain")
     g.add_argument("--wandb",           action="store_true", default=False)
     g.add_argument("--resume",          type=str,   default=None,
                    help="Path to checkpoint to resume from")
@@ -521,5 +538,3 @@ def parse_args():
 
 if __name__ == "__main__":
     pretrain(parse_args())
-
-
